@@ -6,7 +6,7 @@ import os
 
 app = FastAPI(title="ML Platform 1.0 API")
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "training", "model.joblib")
+MODEL_PATH = "model.joblib"
 
 # Load model at startup
 model = joblib.load(MODEL_PATH)
