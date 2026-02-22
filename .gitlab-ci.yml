@@ -1,0 +1,10 @@
+stages:
+  - build
+
+build_job:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t ml-api .
