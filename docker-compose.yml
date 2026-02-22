@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:15
+    container_name: ml_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow_server
+    restart: always
+    depends_on:
+      - postgres
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow
+      --default-artifact-root file:///mlflow/artifacts
+      --host 0.0.0.0
+      --serve-artifacts
+      --allowed-hosts *
+    volumes:
+      - mlflow_data:/mlflow
+    ports:
+      - "5000:5000"
+
+  api:
+    build: .
+    container_name: ml_api
+    restart: always
+    depends_on:
+      - mlflow
+    ports:
+      - "8000:8000"
+
+#    nginx:
+#      image: nginx:latest
+#      container_name: ml_nginx
+#      restart: always
+#      depends_on:
+#        - api
+#      ports:
+#        - "80:80"
+#      volumes:
+#        - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  pgdata:
+  mlflow_data:
