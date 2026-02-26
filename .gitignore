@@ -17,3 +17,7 @@ mlflow_data/
 
 # OS
 .DS_Store
+mlruns/
+__pycache__/
+*.pyc
+.env

@@ -1,6 +1,5 @@
 import mlflow
 import mlflow.sklearn
-from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 
 import numpy as np
@@ -8,86 +7,84 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 
-# -----------------------------
-# Настройки
-# -----------------------------
-mlflow.set_tracking_uri("http://mlflow:5000")
-mlflow.set_experiment("linear-regression-experiment")
+import os
 
+
+# ==========================
+# 1️⃣ Конфигурация
+# ==========================
+
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 MODEL_NAME = "linear-model"
 
-# -----------------------------
-# Генерация данных
-# -----------------------------
-X = np.random.rand(100, 1) * 10
-y = 3 * X.squeeze() + 5 + np.random.randn(100)
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+mlflow.set_experiment("linear-regression-experiment")
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 
-# -----------------------------
-# Тренировка
-# -----------------------------
+# ==========================
+# 2️⃣ Генерация данных
+# ==========================
+
+# В реальном проде тут будет загрузка production data
+X = np.random.rand(1000, 3)
+y = X @ np.array([3.5, -2.0, 1.0]) + np.random.randn(1000) * 0.5
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+
+# ==========================
+# 3️⃣ Обучение модели
+# ==========================
+
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+preds = model.predict(X_test)
+rmse = np.sqrt(mean_squared_error(y_test, preds))
+
+
+# ==========================
+# 4️⃣ Логирование в MLflow
+# ==========================
+
 with mlflow.start_run() as run:
 
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-
-    predictions = model.predict(X_test)
-    rmse = np.sqrt(mean_squared_error(y_test, predictions))
-
-    # Логируем метрику
+    mlflow.log_param("model_type", "LinearRegression")
     mlflow.log_metric("rmse", rmse)
 
-    # Логируем модель + регистрируем
-    signature = infer_signature(X_train, model.predict(X_train))
-
-    model_info = mlflow.sklearn.log_model(
+    mlflow.sklearn.log_model(
         sk_model=model,
-        artifact_path="model",
-        signature=signature,
-        registered_model_name=MODEL_NAME,
+        name="model",
+        registered_model_name=MODEL_NAME
     )
 
     print(f"Model logged. RMSE: {rmse}")
 
-# -----------------------------
-# Auto Promotion Logic
-# -----------------------------
+
+# ==========================
+# 5️⃣ Работа с Model Registry
+# ==========================
+
 client = MlflowClient()
-latest_versions = client.get_latest_versions(MODEL_NAME)
 
-# Получаем последнюю зарегистрированную версию
-new_version = latest_versions[-1]
+# Получаем все версии модели
+model_versions = client.search_model_versions(
+    f"name='{MODEL_NAME}'"
+)
 
-production_versions = client.get_latest_versions(MODEL_NAME, stages=["Production"])
+# Находим максимальный номер версии
+latest_version = max(
+    [int(mv.version) for mv in model_versions]
+)
 
-if production_versions:
-    prod_version = production_versions[0]
-    prod_run = client.get_run(prod_version.run_id)
+# Назначаем alias production новой версии
+client.set_registered_model_alias(
+    name=MODEL_NAME,
+    alias="production",
+    version=str(latest_version)
+)
 
-    old_rmse = prod_run.data.metrics["rmse"]
-    new_run = client.get_run(new_version.run_id)
-    new_rmse = new_run.data.metrics["rmse"]
-
-    print(f"Old RMSE: {old_rmse}")
-    print(f"New RMSE: {new_rmse}")
-
-    if new_rmse < old_rmse:
-        print("New model is better. Promoting to Production.")
-        client.transition_model_version_stage(
-            name=MODEL_NAME,
-            version=new_version.version,
-            stage="Production",
-        )
-    else:
-        print("New model is worse. Keeping old Production model.")
-
-else:
-    print("No Production model found. Promoting first model.")
-    client.transition_model_version_stage(
-        name=MODEL_NAME,
-        version=new_version.version,
-        stage="Production",
-    )
-
+print(f"Alias 'production' -> version {latest_version}")
 print("Training pipeline finished.")
