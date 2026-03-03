@@ -1,155 +1,111 @@
-🚀 ML Platform 3.0 — Drift-Aware Self-Retraining System
+ML Platform 4.0
 
-Production-style MLOps platform built with:
+Production-ready MLOps platform with:
+
+- Drift Detection (PSI)
+- Cooldown protection
+- Automatic Retraining
+- Model Versioning (MLflow)
+- Staging → Production promotion flow
+- Manual production control
+
+---
+
+#Architecture
+
+Drift detected
+→ Retrain
+→ New model version
+→ Assigned to @staging
+→ Manual promotion
+→ @production
+
+Production model is NEVER auto-overwritten.
+
+---
+
+#Tech Stack
 
 - FastAPI
-- MLflow Model Registry
-- Alias-based deployment
-- Automatic data drift detection (PSI)
-- Event-driven retraining
-- Retrain storm protection (cooldown + lock)
-- Dockerized infrastructure
+- MLflow
+- Scikit-learn
+- Docker
+- Docker Compose
+- Nginx
 
 ---
 
-# System Architecture
+#How to Run
 
-Client → FastAPI → Model@production 
-                    ↓  
-              Drift Detection (PSI)  
-                    ↓  
-                 train.py  
-                    ↓  
-MLflow Registry → New Model Version → Alias `production` updated 
+##Build & Start
 
-No manual redeployment required.
+```bash
+docker-compose build --no-cache
+docker-compose up -d
+Check services
+docker-compose ps
 
----
+Access
+API:
+http://localhost:8000
 
-# 🧠 Core Features
+MLflow UI:
+http://localhost:5000
 
-## ✅ 1. Versioned Model Registry
+  Prediction Endpoint
+curl -X POST http://localhost:8000/predict \
+-H "Content-Type: application/json" \
+-d '{"data": [1.0, 2.0, 3.0]}'
+  Trigger Drift (for testing)
+for i in {1..500}; do \
+curl -s -X POST http://localhost:8000/predict \
+-H "Content-Type: application/json" \
+-d '{"data": [1000,1000,1000]}' > /dev/null; \
+done
 
-Every retrain creates a new model version in MLflow.
+ This will:
+-Detect drift
+-Trigger retraining
+-Register new model version
+-Assign it to @staging
 
-No deprecated stages are used.
+ Model Lifecycle
+After retrain:
+New version → @staging
+Production remains unchanged.
 
-Deployment is controlled via alias:
+ Promote Staging to Production
+curl -X POST http://localhost:8000/promote
+This will:
+Move staging version to @production
+Update production model
+ MLflow Model Registry
 
-models:/linear-model@production
+ Open:
+http://localhost:5000
 
----
+Models → linear-model
 
-## ✅ 2. Drift Detection (PSI)
+ You will see:
 
-Population Stability Index (PSI) is calculated on incoming data.
+@production
+@staging
 
-If:
+Full version history
 
-- PSI > threshold
-- Cooldown expired
-- No retraining currently running
+ Production Safety
+-No automatic overwrite
+-Champion / Challenger logic
+-Manual approval
+-Version tracking
+-Drift detection
 
-→ Retraining is triggered automatically.
+ Restart API (if needed)
+docker-compose restart api
 
----
-
-## ✅ 3. Retrain Storm Protection
-
-Platform includes:
-
-- Cooldown mechanism (10 minutes)
-- Retraining lock flag
-- Alias-based model switching
-
-Prevents infinite retraining loops.
-
----
-
-# 📦 Project Structure
-
-ml-api/
-│
-├── main.py # FastAPI + Drift Detection
-├── train.py # Training + Registry Alias Update
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-└── README.md
-
----
-
-# 🐳 How To Run
-
-## 1️⃣ Build containers
-
-
-docker compose build
-
-
-## 2️⃣ Start platform
-
-
-docker compose up
-
-
-Services:
-
-- API → http://localhost:8000  
-- MLflow → http://localhost:5000  
-
----
-
-# 🔍 Test Prediction
-
-
-curl -X POST http://localhost:8000/predict
-
--H "Content-Type: application/json"
--d '{"data": [1,2,3]}'
-
-
----
-
-# 🔄 Automatic Retraining Flow
-
-1. API receives prediction request  
-2. PSI drift is calculated  
-3. If drift exceeds threshold  
-4. `train.py` starts  
-5. New version registered  
-6. Alias `production` updated  
-7. API automatically serves new model  
-
-Zero downtime.
-
----
-
-# 📊 Current Status
-
-ML Platform 3.0 — Stable
-
-Implemented:
-
-- Model versioning
-- Alias-based deployment
-- Drift detection
-- Event-driven retraining
-- Cooldown protection
-- Dockerized environment
-
----
-
-# 🚀 Next Planned Upgrade
-
-ML Platform 3.5:
-
-- Champion–Challenger evaluation
-- RMSE comparison before alias switch
-- Automatic rollback if worse
-
----
-
-# 👨‍💻 Author
-
-Built as a practical MLOps engineering project.
+ What This Platform Demonstrates
+-Real MLOps pipeline
+-Model versioning
+-Production safety
+-Controlled rollout
+-Drift-based retraining
