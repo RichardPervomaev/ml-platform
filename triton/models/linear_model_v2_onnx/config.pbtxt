@@ -1,0 +1,25 @@
+name: "linear_model_v2_onnx"
+platform: "onnxruntime_onnx"
+
+max_batch_size: 8
+
+dynamic_batching {
+  preferred_batch_size: [4, 8]
+  max_queue_delay_microseconds: 10000
+}
+
+input [
+  {
+    name: "input"
+    data_type: TYPE_FP32
+    dims: [3]
+  }
+]
+
+output [
+  {
+    name: "variable"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+]

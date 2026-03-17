@@ -1,192 +1,290 @@
-import os
+import random
 import logging
+import requests
 import threading
-import time
-import numpy as np
-import pandas as pd
-import subprocess
-
+import random
+import logging
+import requests
 from data_collector import collector
-from drift_engine import drift_engine
-
-import mlflow
-import mlflow.pyfunc
-from mlflow.tracking import MlflowClient
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
-# ==========================
-# CONFIG
-# ==========================
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-MODEL_NAME = "linear-model"
-MODEL_ALIAS = "production"
 
-DRIFT_CHECK_INTERVAL = 60        # секунд
-DRIFT_SAMPLE_SIZE = 300          # сколько данных нужно
-RETRAIN_COOLDOWN = 600           # 10 минут
-
-mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-client = MlflowClient()
-
-logging.basicConfig(level=logging.INFO)
+# ==========================================
+# LOGGING
+# ==========================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="ML Platform 3.5 Stable")
 
-model = None
-current_version = None
-baseline_data = None
-
-model_lock = threading.Lock()
-last_retrain_time = 0
-retraining_in_progress = False
+# ==========================================
+# FASTAPI APP
+# ==========================================
+app = FastAPI(title="ML Platform Gateway", version="6.2")
 
 
-# ==========================
-# MODEL LOADER
-# ==========================
+# ==========================================
+# TRITON CONFIG
+# ==========================================
+# Triton сейчас запущен отдельно от docker-compose.
+# Поэтому из контейнера api ходим к нему через host.docker.internal
+TRITON_BASE_URL = "http://triton:8000"
 
-def load_model():
-    global model, current_version, baseline_data
-
-    version_info = client.get_model_version_by_alias(
-        MODEL_NAME,
-        MODEL_ALIAS
-    )
-
-    if current_version == version_info.version:
-        return
-
-    logger.info(f"Loading model version {version_info.version}")
-
-    model_uri = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
-    model = mlflow.pyfunc.load_model(model_uri)
-
-    artifact_path = client.download_artifacts(
-        version_info.run_id,
-        "model/baseline.csv"
-    )
-
-    baseline_data = pd.read_csv(artifact_path).values
-    current_version = version_info.version
+# Две serving-модели в Triton
+MODEL_A = "linear_model_onnx"
+MODEL_B = "linear_model_v2_onnx"
 
 
-# ==========================
-# DRIFT MONITOR
-# ==========================
-
-def background_drift_monitor():
-    global last_retrain_time, retraining_in_progress
-
-    while True:
-        time.sleep(DRIFT_CHECK_INTERVAL)
-
-        if collector.size() < DRIFT_SAMPLE_SIZE:
-            continue
-
-        if baseline_data is None:
-            continue
-
-        prod_array = np.array(collector.get_all())
-
-        drift_detected, psi = drift_engine.detect(
-            baseline_data,
-            prod_array
-        )
-
-        if drift_detected:
-            current_time = time.time()
-
-            if retraining_in_progress:
-                logger.info("Retrain already running — skipping.")
-                continue
-
-            if current_time - last_retrain_time < RETRAIN_COOLDOWN:
-                logger.info("Drift detected but cooldown active.")
-                continue
-
-            logger.warning(f"DATA DRIFT DETECTED! PSI={psi}")
-
-            retraining_in_progress = True
-            last_retrain_time = current_time
-
-            subprocess.Popen(["python", "train.py"])
-
-        else:
-            logger.info(f"No drift. PSI={psi}")
+# ==========================================
+# ROLLOUT CONFIG
+# ==========================================
+# 80% запросов идут в модель A
+# 20% запросов идут в модель B
+ROLLOUT_A_PERCENT = 0.8
 
 
-# ==========================
-# STARTUP
-# ==========================
-
-@app.on_event("startup")
-def startup_event():
-    load_model()
-    threading.Thread(
-        target=background_drift_monitor,
-        daemon=True
-    ).start()
-
-
-# ==========================
-# SCHEMAS
-# ==========================
-
+# ==========================================
+# REQUEST / RESPONSE SCHEMAS
+# ==========================================
 class PredictRequest(BaseModel):
     data: List[float]
 
+
 class PredictResponse(BaseModel):
-    predictions: List[float]
-    model_version: str
+    prediction: float
+    model_name: str
+    rollout_group: str
 
 
-# ==========================
-# ENDPOINTS
-# ==========================
+# ==========================================
+# HELPER: выбор модели по правилу A/B
+# ==========================================
+def choose_model() -> tuple[str, str]:
+    """
+    Выбираем модель по rollout-правилу.
 
-@app.post("/predict", response_model=PredictResponse)
-def predict(request: PredictRequest):
+    random.random() возвращает число от 0 до 1.
+    Если число меньше 0.8 -> идём в модель A.
+    Иначе -> идём в модель B.
+    """
+    r = random.random()
 
-    global retraining_in_progress
+    if r < ROLLOUT_A_PERCENT:
+        return MODEL_A, "A"
+    else:
+        return MODEL_B, "B"
 
-    if model is None:
-        raise HTTPException(status_code=500, detail="Model not loaded")
 
-    df = pd.DataFrame([request.data])
+# ==========================================
+# HELPER: вызов Triton
+# ==========================================
+def call_triton(model_name: str, data: List[float]) -> float:
+    """
+    Отправляем запрос в Triton и возвращаем предсказание.
 
-    with model_lock:
-        preds = model.predict(df)
+    Triton ждёт payload такого вида:
+    {
+      "inputs": [
+        {
+          "name": "input",
+          "shape": [1, 3],
+          "datatype": "FP32",
+          "data": [[1.0, 2.0, 3.0]]
+        }
+      ]
+    }
+
+    shape [1, 3]:
+    - 1 = размер batch
+    - 3 = число признаков
+    """
+    url = f"{TRITON_BASE_URL}/v2/models/{model_name}/infer"
+
+    payload = {
+        "inputs": [
+            {
+                "name": "input",
+                "shape": [1, 3],
+                "datatype": "FP32",
+                "data": [data]
+            }
+        ]
+    }
+
+    logger.info("Calling Triton model=%s payload=%s", model_name, payload)
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logger.exception("Failed to connect to Triton: %s", e)
+        raise HTTPException(status_code=500, detail="Triton is unavailable")
+
+    if response.status_code != 200:
+        logger.error("Triton returned error: %s", response.text)
+        raise HTTPException(status_code=500, detail=f"Triton error: {response.text}")
+
+    result = response.json()
+
+    logger.info("Triton response from model=%s result=%s", model_name, result)
+
+    try:
+        prediction = float(result["outputs"][0]["data"][0])
+    except Exception as e:
+        logger.exception("Failed to parse Triton response: %s", e)
+        raise HTTPException(status_code=500, detail="Bad Triton response")
+
+    return prediction
+
+def shadow_call_and_log(shadow_model_name: str, data: List[float], primary_prediction: float):
+    """
+    Фоновый вызов shadow-модели.
+
+    Что происходит:
+    - вызываем модель B
+    - сравниваем её предсказание с основной моделью A
+    - пишем разницу в лог
+
+    Важно:
+    - ошибки shadow-модели не должны ломать ответ пользователю
+    - поэтому всё завернуто в try/except
+    """
+    try:
+        shadow_prediction = call_triton(shadow_model_name, data)
+
+        diff = abs(primary_prediction - shadow_prediction)
+
+        logger.info(
+            "SHADOW COMPARE primary_model=%s shadow_model=%s input=%s primary_prediction=%s shadow_prediction=%s abs_diff=%s",
+            MODEL_A,
+            shadow_model_name,
+            data,
+            primary_prediction,
+            shadow_prediction,
+            diff
+        )
+
+    except Exception as e:
+        logger.exception("Shadow call failed: %s", e)
+
+# ==========================================
+# HEALTH ENDPOINT
+# ==========================================
+@app.get("/health")
+def health():
+    """
+    Проверка, что API gateway жив.
+    """
+    return {"status": "ok"}
+
+
+# ==========================================
+# DIRECT ENDPOINT FOR MODEL A
+# ==========================================
+@app.post("/predict-a", response_model=PredictResponse)
+def predict_a(request: PredictRequest):
+    """
+    Явный вызов модели A.
+    Полезно для проверки.
+    """
+    if len(request.data) != 3:
+        raise HTTPException(status_code=400, detail="Exactly 3 features are required")
+
+    prediction = call_triton(MODEL_A, request.data)
+
+    return PredictResponse(
+        prediction=prediction,
+        model_name=MODEL_A,
+        rollout_group="A"
+    )
+
+
+# ==========================================
+# DIRECT ENDPOINT FOR MODEL B
+# ==========================================
+@app.post("/predict-b", response_model=PredictResponse)
+def predict_b(request: PredictRequest):
+    """
+    Явный вызов модели B.
+    Полезно для проверки.
+    """
+    if len(request.data) != 3:
+        raise HTTPException(status_code=400, detail="Exactly 3 features are required")
+
+    prediction = call_triton(MODEL_B, request.data)
+
+    return PredictResponse(
+        prediction=prediction,
+        model_name=MODEL_B,
+        rollout_group="B"
+    )
+
+
+# ==========================================
+# A/B ROLLOUT ENDPOINT
+# ==========================================
+@app.post("/predict-ab", response_model=PredictResponse)
+def predict_ab(request: PredictRequest):
+    if len(request.data) != 3:
+        raise HTTPException(status_code=400, detail="Exactly 3 features are required")
 
     collector.add(request.data)
 
+    model_name, rollout_group = choose_model()
+
+    prediction = call_triton(model_name, request.data)
+
     return PredictResponse(
-        predictions=preds.tolist(),
-        model_version=current_version
+        prediction=prediction,
+        model_name=model_name,
+        rollout_group=rollout_group
     )
+    """
+    Главный endpoint A/B rollout.
 
+    Логика:
+    1. Принимаем входные данные
+    2. Выбираем модель A или B по правилу 80/20
+    3. Отправляем запрос в Triton
+    4. Возвращаем:
+       - prediction
+       - какая модель сработала
+       - какая rollout-группа
+    """
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+@app.post("/predict-shadow", response_model=PredictResponse)
+def predict_shadow(request: PredictRequest):
+    """
+    Shadow deployment endpoint.
 
-@app.post("/promote")
-def promote():
+    Логика:
+    1. Пользователю всегда отдаём ответ от модели A
+    2. Модель B вызываем в фоне
+    3. В лог пишем сравнение A vs B
 
-    staging = client.get_model_version_by_alias(
-        MODEL_NAME,
-        "staging"
+    Это безопаснее, чем A/B rollout:
+    - пользователь всегда получает проверенный ответ
+    - новая модель проверяется незаметно
+    """
+    if len(request.data) != 3:
+        raise HTTPException(status_code=400, detail="Exactly 3 features are required")
+
+    # Основной боевой ответ
+    primary_prediction = call_triton(MODEL_A, request.data)
+
+    # Фоновый shadow-вызов
+    thread = threading.Thread(
+        target=shadow_call_and_log,
+        args=(MODEL_B, request.data, primary_prediction),
+        daemon=True
     )
+    thread.start()
 
-    client.set_registered_model_alias(
-        MODEL_NAME,
-        "production",
-        staging.version
+    return PredictResponse(
+        prediction=primary_prediction,
+        model_name=MODEL_A,
+        rollout_group="shadow-primary-A"
     )
-
-    return {
-        "message": f"Version {staging.version} promoted to production"
-    }

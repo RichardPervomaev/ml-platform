@@ -26,13 +26,12 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/predict")
-def predict(request: PredictionRequest):
-    data = np.array(request.features).reshape(1, -1)
-    prediction = model.predict(data)[0]
-    probability = model.predict_proba(data)[0].tolist()
+from api.triton_client import predict as triton_predict
 
-    return {
-        "prediction": int(prediction),
-        "probabilities": probability
-    }
+
+@app.post("/predict")
+def predict(data: list):
+
+    result = triton_predict(data)
+
+    return result

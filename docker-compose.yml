@@ -37,11 +37,19 @@ services:
       - mlflow
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      SHARED_DATA_DIR: /shared
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_COLLECTOR_KEY: production_data
+      MAX_WINDOW_SIZE: 1000
     volumes:
       - mlflow_data:/mlflow
+      - ./triton/models:/app/triton/models
+      - shared_data:/shared
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
-    - "8000:8000"
+      - "8003:8000"
 
   nginx:
     image: nginx:latest
@@ -54,7 +62,65 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+  deployer:
+    build: ./deployer
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./triton/models:/models
+      - mlflow_data:/mlflow
+    depends_on:
+      - mlflow
+
+  drift-worker:
+    build: .
+    container_name: ml_drift_worker
+    restart: always
+    depends_on:
+      - mlflow
+      - redis
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_COLLECTOR_KEY: production_data
+      MAX_WINDOW_SIZE: 1000
+      DRIFT_CHECK_INTERVAL: 15
+      DRIFT_SAMPLE_SIZE: 20
+      RETRAIN_COOLDOWN: 60
+    volumes:
+      - mlflow_data:/mlflow
+      - ./triton/models:/app/triton/models
+    command: python drift_worker.py
+
+  redis:
+    image: redis:7
+    container_name: ml_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  trainer:
+    build: .
+    container_name: ml_trainer
+    restart: always
+    depends_on:
+      - mlflow
+      - redis
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      RETRAIN_QUEUE_KEY: retrain_jobs
+      AUTO_PROMOTE_IF_BETTER: "true"
+    volumes:
+      - mlflow_data:/mlflow
+      - ./triton/models:/app/triton/models
+    command: python trainer.py
 
 volumes:
   pgdata:
   mlflow_data:
+  shared_data:

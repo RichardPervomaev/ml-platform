@@ -1,6 +1,11 @@
 fastapi
 uvicorn
-scikit-learn
-joblib
 numpy
+scikit-learn
+mlflow
+python-multipart
 pydantic
+skl2onnx
+onnx
+onnxruntime
+pandas
